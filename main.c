@@ -14,16 +14,30 @@
 #include "amcom.h"
 #include "amcom_packets.h"
 
+typedef enum {
+    FOOD_RIRST,
+    FOOD_AND_BOTS_EQUAL
+} GetMoveAngleMethod;
+
 static const max_players = 8;
 static const player_payload_size = 11;
 static const food_state_size = sizeof(AMCOM_FoodState);
 static const char* base_username = "rzujmi";
 static char username[24] = "Rzujmi";
 static uint8_t my_id = 0;
-static uint16_t food_on_map = 0;
 
 static AMCOM_PlayerState players[8];
 static AMCOM_FoodState foods[128];
+
+bool food_on_map(void) {
+    for(size_t i = 0; i < sizeof(foods)/sizeof(AMCOM_FoodState); ++i)  {
+        if(foods[i].state == 1) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 void parse_players(const AMCOM_Packet* packet) {
     if(packet == NULL)
@@ -37,6 +51,8 @@ void parse_players(const AMCOM_Packet* packet) {
         
     }
 }
+
+uint16_t get_player_hp(void);
 
 void print_food_array(void) {
     for(size_t i = 0; i < sizeof(foods)/sizeof(AMCOM_FoodState); ++i) {
@@ -96,7 +112,37 @@ void initialize_food_array(void) {
     memset(foods, 0x00, sizeof(foods));
 }
 
-uint16_t get_nearest_food(float* foodX, float* foodY) {
+float get_nearest_smaller_enemy(float* enemyX, float* enemyY) {
+    float nearest_yet_x = 1000*1.41;
+    float nearest_yet_y = 1000*1.41;
+    float smallestdistance = INFINITY;
+    float px = 0, py = 0;
+
+    for(size_t i = 0; i < sizeof(players)/sizeof(AMCOM_PlayerState); i++) {
+        if(players[i].hp > 0 && players[i].playerNo != my_id && players[i].hp < get_player_hp()) {
+            float ex = players[i].x;
+            float ey = players[i].y;
+
+            get_player_position(&px, &py);
+
+            float vx = ex - px;
+            float vy = ey - py;
+            float distance = sqrt(vx*vx + vy*vy);
+            if (distance < smallestdistance) {
+                smallestdistance = distance;
+                nearest_yet_x = ex;
+                nearest_yet_y = ey;
+                // fprintf(stdout, "x, y: %f, %f, distance: %f\n", fx, fy, distance);
+            }
+        }
+    }
+    
+    *enemyX = nearest_yet_x;
+    *enemyY = nearest_yet_y;
+    return smallestdistance;
+}
+
+float get_nearest_food(float* foodX, float* foodY) {
     float nearest_yet_x = 1000*1.41;
     float nearest_yet_y = 1000*1.41;
     float smallestdistance = INFINITY;
@@ -123,6 +169,7 @@ uint16_t get_nearest_food(float* foodX, float* foodY) {
     
     *foodX = nearest_yet_x;
     *foodY = nearest_yet_y;
+    return smallestdistance;
 }
 
 void get_player_position(float* px, float* py) {
@@ -136,14 +183,55 @@ void get_player_position(float* px, float* py) {
     }
 }
 
+uint16_t get_player_hp(void) {
+    for(uint8_t i = 0; i < sizeof(players); i++) {
+        if(players[i].playerNo == my_id) {
+            return players[i].hp;
+        }
+    }
+}
+
+float get_move_angle(GetMoveAngleMethod method) {
+    float nearestFoodX = 0.0f;
+    float nearestFoodY = 0.0f;
+    float nearestEnemyX = 0.0f;
+    float nearestEnemyY = 0.0f;
+    float px, py; // player position
+    float vx, vy; // vector pointing from player to food
+
+    get_player_position(&px, &py);
+
+    float food_distance = get_nearest_food(&nearestFoodX, &nearestFoodY);
+    float enemy_distance = get_nearest_smaller_enemy(&nearestEnemyX, &nearestEnemyY);
+
+    if(method == FOOD_RIRST) {
+        get_nearest_food(&nearestFoodX, &nearestFoodY);
+        vx = nearestFoodX - px;
+        vy = nearestFoodY - py;
+        if(!food_on_map()) {
+            vx = nearestEnemyX - px;
+            vy = nearestEnemyY - py;
+        }
+    } else if(method == FOOD_AND_BOTS_EQUAL) {
+        if (enemy_distance < food_distance) {
+            vx = nearestEnemyX - px;
+            vy = nearestEnemyY - py;
+        } else {
+            vx = nearestFoodX - px;
+            vy = nearestFoodY - py;
+        }
+    }
+
+
+    return atan2(vy, vx);
+}
+
 
 void amPacketHandler(const AMCOM_Packet* packet, void* userContext) {
 
     uint8_t buf[AMCOM_MAX_PACKET_SIZE];
     int toSend = 0;
     static int first = 1;
-    static float nearestFoodX = 0.0f;
-    static float nearestFoodY = 0.0f;
     static bool players_set = false;
 
 
@@ -192,16 +280,9 @@ void amPacketHandler(const AMCOM_Packet* packet, void* userContext) {
 
             // print_food_array();
             AMCOM_MoveResponsePayload moveResponse;
-            float px, py; // player position
-            float vx, vy; // vector pointing from player to food
 
-            get_player_position(&px, &py);
-            get_nearest_food(&nearestFoodX, &nearestFoodY);
-            vx = nearestFoodX - px;
-            vy = nearestFoodY - py;
+            moveResponse.angle = get_move_angle(FOOD_AND_BOTS_EQUAL);
 
-            moveResponse.angle = atan2(vy, vx);
-            // fprintf(stdout, "angle = %f\n", moveResponse.angle);
             toSend = AMCOM_Serialize(AMCOM_MOVE_RESPONSE, &moveResponse, sizeof(moveResponse), buf);
         break;
 
